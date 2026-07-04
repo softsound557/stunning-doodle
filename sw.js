@@ -7,7 +7,7 @@ const SHELL_FILES = [
   "manifest.json",
   "icons/icon-192.png",
   "icons/icon-512.png",
-  "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js",
+  "https://cdn.jsdelivr.net/npm/@azure/msal-browser@2/lib/msal-browser.min.js",
 ];
 
 self.addEventListener("install", (event) => {
