@@ -1,24 +1,22 @@
-const STORAGE_KEY = "share_url";
+const CLIENT_ID = "9a019c14-5029-4055-b5c8-0e42509f6999";
+const REDIRECT_URI = "https://softsound557.github.io/stunning-doodle/";
+const SCOPES = ["Files.Read"];
+const FOLDER_NAME = "荷物管理エクスポート";
+const GRAPH_ROOT = `https://graph.microsoft.com/v1.0/me/drive/root:/${encodeURIComponent(FOLDER_NAME)}`;
 
-function encodeShareUrl(url) {
-  const base64 = btoa(url)
-    .replace(/=+$/, "")
-    .replace(/\//g, "_")
-    .replace(/\+/g, "-");
-  return "u!" + base64;
-}
+const msalInstance = new msal.PublicClientApplication({
+  auth: {
+    clientId: CLIENT_ID,
+    authority: "https://login.microsoftonline.com/consumers",
+    redirectUri: REDIRECT_URI,
+  },
+  cache: {
+    cacheLocation: "localStorage",
+  },
+});
 
-function getShareUrl() {
-  return localStorage.getItem(STORAGE_KEY) || "";
-}
-
-function setShareUrl(url) {
-  localStorage.setItem(STORAGE_KEY, url);
-}
-
-let SHARE_URL = getShareUrl();
-let GRAPH_ROOT = SHARE_URL ? `https://graph.microsoft.com/v1.0/shares/${encodeShareUrl(SHARE_URL)}/driveItem` : null;
 let items = [];
+const photoUrlCache = new Map();
 
 const setupView = document.getElementById("setup-view");
 const listView = document.getElementById("list-view");
@@ -28,36 +26,68 @@ const countEl = document.getElementById("count");
 const searchInput = document.getElementById("search-input");
 const statusEl = document.getElementById("status");
 
-function photoUrl(filename) {
-  return `${GRAPH_ROOT}:/photos/${filename}:/content`;
-}
-
 function showStatus(message) {
   statusEl.textContent = message;
   statusEl.hidden = !message;
 }
 
-function showSetup() {
+function showSignIn() {
   setupView.hidden = false;
   listView.hidden = true;
   detailView.hidden = true;
 }
 
-async function loadData() {
-  if (!GRAPH_ROOT) {
-    showSetup();
-    return;
+async function getToken() {
+  const account = msalInstance.getActiveAccount();
+  try {
+    const result = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account });
+    return result.accessToken;
+  } catch (e) {
+    await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
+    throw e;
   }
+}
+
+async function loadPhotoUrl(filename) {
+  if (photoUrlCache.has(filename)) return photoUrlCache.get(filename);
+  const token = await getToken();
+  const res = await fetch(`${GRAPH_ROOT}/photos/${encodeURIComponent(filename)}:/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("photo fetch failed: " + res.status);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  photoUrlCache.set(filename, url);
+  return url;
+}
+
+const thumbObserver = new IntersectionObserver((entries, obs) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const el = entry.target;
+    obs.unobserve(el);
+    const filename = el.dataset.filename;
+    loadPhotoUrl(filename)
+      .then((url) => { el.src = url; })
+      .catch(() => {});
+  }
+});
+
+async function loadData() {
   setupView.hidden = true;
   listView.hidden = false;
 
   try {
-    const res = await fetch(`${GRAPH_ROOT}:/data.json:/content`, { cache: "no-store" });
+    const token = await getToken();
+    const res = await fetch(`${GRAPH_ROOT}/data.json:/content`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
     if (!res.ok) throw new Error("status " + res.status);
     items = await res.json();
     showStatus("");
   } catch (e) {
-    showStatus("最新データを取得できませんでした（前回表示分を表示しています）");
+    showStatus("最新データを取得できませんでした(前回表示分を表示しています)");
   }
   renderList();
 }
@@ -90,9 +120,10 @@ function renderList() {
     const thumb = document.createElement(hasPhoto ? "img" : "div");
     thumb.className = "thumb" + (hasPhoto ? "" : " no-photo");
     if (hasPhoto) {
-      thumb.src = photoUrl(it.photos[0]);
+      thumb.dataset.filename = it.photos[0];
       thumb.loading = "lazy";
       thumb.alt = "";
+      thumbObserver.observe(thumb);
     } else {
       thumb.textContent = "写真なし";
     }
@@ -123,7 +154,7 @@ function renderList() {
   }
 }
 
-function showDetail(id) {
+async function showDetail(id) {
   const it = items.find((x) => x.id === id);
   if (!it) return;
 
@@ -149,9 +180,10 @@ function showDetail(id) {
     for (const filename of it.photos) {
       const img = document.createElement("img");
       img.className = "photo";
-      img.loading = "lazy";
-      img.src = photoUrl(filename);
       photosEl.appendChild(img);
+      loadPhotoUrl(filename)
+        .then((url) => { img.src = url; })
+        .catch(() => {});
     }
   }
 
@@ -167,17 +199,11 @@ document.getElementById("back-link").addEventListener("click", (e) => {
 
 document.getElementById("settings-link").addEventListener("click", (e) => {
   e.preventDefault();
-  showSetup();
+  msalInstance.logoutRedirect();
 });
 
-document.getElementById("setup-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const url = document.getElementById("setup-input").value.trim();
-  if (!url) return;
-  setShareUrl(url);
-  SHARE_URL = url;
-  GRAPH_ROOT = `https://graph.microsoft.com/v1.0/shares/${encodeShareUrl(SHARE_URL)}/driveItem`;
-  loadData();
+document.getElementById("signin-button").addEventListener("click", () => {
+  msalInstance.loginRedirect({ scopes: SCOPES });
 });
 
 searchInput.addEventListener("input", renderList);
@@ -186,4 +212,18 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js");
 }
 
-loadData();
+async function init() {
+  const result = await msalInstance.handleRedirectPromise();
+  let account = msalInstance.getAllAccounts()[0];
+  if (result && result.account) {
+    account = result.account;
+  }
+  if (!account) {
+    showSignIn();
+    return;
+  }
+  msalInstance.setActiveAccount(account);
+  await loadData();
+}
+
+init();
